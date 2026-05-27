@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Beach Bucket</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: linear-gradient(180deg, #87CEEB 0%, #FFE4B5 60%, #F4E4BC 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #wrap {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+  }
+  h1 {
+    margin: 0;
+    color: #2E5984;
+    text-shadow: 2px 2px 0 #fff;
+    letter-spacing: 1px;
+  }
+  #game {
+    background: #87CEEB;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    max-width: 95vw;
+    max-height: 80vh;
+    touch-action: none;
+  }
+  .hint {
+    color: #2E5984;
+    font-size: 14px;
+    opacity: 0.85;
+  }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <h1>🏖️ Beach Bucket</h1>
+    <canvas id="game" width="800" height="560"></canvas>
+    <div class="hint">← → or A/D to move • Tap left/right side on mobile • SPACE to restart</div>
+  </div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+const ITEMS = [
+  { kind: 'shell',     emoji: '🐚', points: 1,  harm: null,    weight: 50 },
+  { kind: 'starfish',  emoji: '⭐', points: 5,  harm: null,    weight: 22 },
+  { kind: 'pearl',     emoji: '💎', points: 15, harm: null,    weight: 6  },
+  { kind: 'crab',      emoji: '🦀', points: 0,  harm: 'life',  weight: 14 },
+  { kind: 'jellyfish', emoji: '🪼', points: 0,  harm: 'score', weight: 8  },
+];
+
+const state = {
+  player: { x: W / 2, y: H - 70, speed: 7 },
+  items: [],
+  score: 0,
+  best: parseInt(localStorage.getItem('beachBucketBest') || '0', 10),
+  lives: 3,
+  spawnTimer: 0,
+  spawnRate: 55,
+  keys: {},
+  touch: null,
+  running: true,
+  t: 0,
+  flash: 0,
+  flashColor: '#fff',
+};
+
+window.addEventListener('keydown', e => {
+  state.keys[e.key.toLowerCase()] = true;
+  if (e.key === ' ') {
+    if (!state.running) reset();
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => { state.keys[e.key.toLowerCase()] = false; });
+
+function pointerHandler(e) {
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+  state.touch = (x / rect.width) * W;
+  if (!state.running && e.type === 'pointerdown') reset();
+}
+canvas.addEventListener('pointerdown', pointerHandler);
+canvas.addEventListener('pointermove', e => { if (state.touch !== null) pointerHandler(e); });
+canvas.addEventListener('pointerup', () => { state.touch = null; });
+canvas.addEventListener('pointercancel', () => { state.touch = null; });
+
+function spawnItem() {
+  const total = ITEMS.reduce((s, i) => s + i.weight, 0);
+  let r = Math.random() * total;
+  let pick = ITEMS[0];
+  for (const it of ITEMS) {
+    r -= it.weight;
+    if (r <= 0) { pick = it; break; }
+  }
+  state.items.push({
+    ...pick,
+    x: 30 + Math.random() * (W - 60),
+    y: -30,
+    vy: 2.2 + Math.random() * 2 + state.t / 1800,
+    rot: (Math.random() - 0.5) * 0.04,
+    angle: 0,
+  });
+}
+
+function update() {
+  let move = 0;
+  if (state.keys['arrowleft'] || state.keys['a']) move -= 1;
+  if (state.keys['arrowright'] || state.keys['d']) move += 1;
+  if (move !== 0) {
+    state.player.x += move * state.player.speed;
+  } else if (state.touch !== null) {
+    const dx = state.touch - state.player.x;
+    if (Math.abs(dx) > 4) state.player.x += Math.sign(dx) * Math.min(state.player.speed, Math.abs(dx));
+  }
+  state.player.x = Math.max(50, Math.min(W - 50, state.player.x));
+
+  state.spawnTimer++;
+  if (state.spawnTimer >= state.spawnRate) {
+    spawnItem();
+    state.spawnTimer = 0;
+    state.spawnRate = Math.max(18, 55 - state.t / 600);
+  }
+
+  const p = state.player;
+  const bucketTop = p.y - 18;
+  const bucketBottom = p.y + 8;
+  const bucketLeft = p.x - 38;
+  const bucketRight = p.x + 38;
+
+  for (let i = state.items.length - 1; i >= 0; i--) {
+    const it = state.items[i];
+    it.y += it.vy;
+    it.angle += it.rot;
+
+    const hit = it.y >= bucketTop && it.y <= bucketBottom &&
+                it.x >= bucketLeft && it.x <= bucketRight;
+
+    if (hit) {
+      if (it.harm === 'life') {
+        state.lives--;
+        flash('#ff5050');
+        if (state.lives <= 0) endGame();
+      } else if (it.harm === 'score') {
+        state.score = Math.floor(state.score / 2);
+        flash('#c44dff');
+      } else {
+        state.score += it.points;
+        flash('#fff7a8', 6);
+      }
+      state.items.splice(i, 1);
+      continue;
+    }
+
+    if (it.y > H + 30) state.items.splice(i, 1);
+  }
+
+  if (state.flash > 0) state.flash--;
+  state.t++;
+}
+
+function flash(color, frames = 10) {
+  state.flash = frames;
+  state.flashColor = color;
+}
+
+function endGame() {
+  state.running = false;
+  if (state.score > state.best) {
+    state.best = state.score;
+    localStorage.setItem('beachBucketBest', String(state.best));
+  }
+}
+
+function drawBackground() {
+  const sky = ctx.createLinearGradient(0, 0, 0, H * 0.45);
+  sky.addColorStop(0, '#87CEEB');
+  sky.addColorStop(1, '#FFE4B5');
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, H * 0.45);
+
+  const sunX = W - 110;
+  const sunY = 90;
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, 70, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 220, 100, 0.25)';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(sunX, sunY, 50, 0, Math.PI * 2);
+  ctx.fillStyle = '#FFD84D';
+  ctx.fill();
+
+  const cloud = (x, y, s) => {
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath();
+    ctx.arc(x, y, 18 * s, 0, Math.PI * 2);
+    ctx.arc(x + 22 * s, y - 6 * s, 22 * s, 0, Math.PI * 2);
+    ctx.arc(x + 46 * s, y, 18 * s, 0, Math.PI * 2);
+    ctx.arc(x + 22 * s, y + 8 * s, 16 * s, 0, Math.PI * 2);
+    ctx.fill();
+  };
+  const drift = (state.t * 0.3) % (W + 200);
+  cloud(120 + drift * 0.4, 70, 1);
+  cloud(420 + drift * 0.2, 50, 0.8);
+
+  const ocean = ctx.createLinearGradient(0, H * 0.45, 0, H * 0.7);
+  ocean.addColorStop(0, '#4A90D9');
+  ocean.addColorStop(1, '#1E5081');
+  ctx.fillStyle = ocean;
+  ctx.fillRect(0, H * 0.45, W, H * 0.25);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    ctx.beginPath();
+    const y = H * 0.47 + i * 28;
+    ctx.moveTo(0, y);
+    for (let x = 0; x <= W; x += 12) {
+      ctx.lineTo(x, y + Math.sin((x + state.t * 2 + i * 40) / 28) * 4);
+    }
+    ctx.stroke();
+  }
+
+  const sand = ctx.createLinearGradient(0, H * 0.7, 0, H);
+  sand.addColorStop(0, '#F4E4BC');
+  sand.addColorStop(1, '#D4A76A');
+  ctx.fillStyle = sand;
+  ctx.fillRect(0, H * 0.7, W, H * 0.3);
+
+  ctx.fillStyle = 'rgba(184, 134, 80, 0.35)';
+  for (let i = 0; i < 30; i++) {
+    const x = (i * 137 + state.t * 0.05) % W;
+    const y = H * 0.72 + (i * 53) % (H * 0.27);
+    ctx.fillRect(x, y, 2, 2);
+  }
+
+  drawPalm(80, H * 0.72);
+  drawPalm(W - 70, H * 0.7, true);
+  drawSandcastle(W / 2 - 320, H - 55);
+}
+
+function drawPalm(x, baseY, mirror = false) {
+  ctx.save();
+  if (mirror) { ctx.translate(x * 2, 0); ctx.scale(-1, 1); }
+  ctx.strokeStyle = '#7B4A1E';
+  ctx.lineWidth = 14;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x, baseY);
+  ctx.quadraticCurveTo(x - 14, baseY - 90, x - 8, baseY - 180);
+  ctx.stroke();
+
+  const topX = x - 8;
+  const topY = baseY - 180;
+  ctx.fillStyle = '#1F8A2A';
+  for (let i = 0; i < 7; i++) {
+    const ang = -Math.PI / 2 + (i - 3) * 0.45;
+    ctx.save();
+    ctx.translate(topX, topY);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.ellipse(35, 0, 45, 12, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#0F5E1A';
+  for (let i = 0; i < 7; i++) {
+    const ang = -Math.PI / 2 + (i - 3) * 0.45;
+    ctx.save();
+    ctx.translate(topX, topY);
+    ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.ellipse(35, 4, 38, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = '#5C3317';
+  ctx.beginPath();
+  ctx.arc(topX - 8, topY + 6, 6, 0, Math.PI * 2);
+  ctx.arc(topX + 6, topY + 10, 6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawSandcastle(x, y) {
+  ctx.fillStyle = '#C99861';
+  ctx.fillRect(x, y, 90, 35);
+  ctx.fillRect(x + 4, y - 18, 22, 18);
+  ctx.fillRect(x + 34, y - 26, 22, 26);
+  ctx.fillRect(x + 64, y - 18, 22, 18);
+  ctx.fillStyle = '#FF6B6B';
+  ctx.beginPath();
+  ctx.moveTo(x + 45, y - 42);
+  ctx.lineTo(x + 38, y - 26);
+  ctx.lineTo(x + 52, y - 26);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#5C3317';
+  ctx.fillRect(x + 40, y + 8, 10, 22);
+}
+
+function drawPlayer() {
+  const p = state.player;
+  const bob = Math.sin(state.t / 8) * 1.5;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.18)';
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y + 45, 36, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#E8B58E';
+  ctx.fillRect(p.x - 11, p.y + 22, 8, 22);
+  ctx.fillRect(p.x + 3, p.y + 22, 8, 22);
+  ctx.fillStyle = '#FF6B6B';
+  ctx.beginPath();
+  ctx.moveTo(p.x - 16, p.y - 5 + bob);
+  ctx.lineTo(p.x + 16, p.y - 5 + bob);
+  ctx.lineTo(p.x + 18, p.y + 25);
+  ctx.lineTo(p.x - 18, p.y + 25);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(p.x - 16, p.y + 10, 32, 4);
+
+  ctx.fillStyle = '#E8B58E';
+  ctx.fillRect(p.x - 26, p.y - 2 + bob, 10, 22);
+  ctx.fillRect(p.x + 16, p.y - 2 + bob, 10, 22);
+
+  ctx.beginPath();
+  ctx.arc(p.x, p.y - 22 + bob, 16, 0, Math.PI * 2);
+  ctx.fillStyle = '#E8B58E';
+  ctx.fill();
+  ctx.fillStyle = '#3a2a1a';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y - 32 + bob, 18, Math.PI, 0);
+  ctx.fill();
+  ctx.fillStyle = '#222';
+  ctx.fillRect(p.x - 13, p.y - 24 + bob, 10, 6);
+  ctx.fillRect(p.x + 3, p.y - 24 + bob, 10, 6);
+  ctx.fillRect(p.x - 4, p.y - 22 + bob, 8, 2);
+  ctx.fillStyle = '#000';
+  ctx.beginPath();
+  ctx.arc(p.x, p.y - 12 + bob, 2.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#FFD84D';
+  ctx.beginPath();
+  ctx.moveTo(p.x - 38, p.y - 18);
+  ctx.lineTo(p.x + 38, p.y - 18);
+  ctx.lineTo(p.x + 32, p.y + 8);
+  ctx.lineTo(p.x - 32, p.y + 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = '#B8860B';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = '#E5B800';
+  ctx.fillRect(p.x - 38, p.y - 21, 76, 5);
+  ctx.beginPath();
+  ctx.arc(p.x, p.y - 30, 22, Math.PI + 0.2, -0.2);
+  ctx.stroke();
+}
+
+function drawItems() {
+  ctx.font = '34px serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const it of state.items) {
+    ctx.save();
+    ctx.translate(it.x, it.y);
+    ctx.rotate(it.angle);
+    ctx.fillText(it.emoji, 0, 0);
+    ctx.restore();
+  }
+}
+
+function drawHUD() {
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.font = 'bold 24px sans-serif';
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillStyle = '#fff';
+
+  const score = `Score: ${state.score}`;
+  ctx.strokeText(score, 20, 35);
+  ctx.fillText(score, 20, 35);
+
+  const best = `Best: ${state.best}`;
+  ctx.font = 'bold 16px sans-serif';
+  ctx.strokeText(best, 20, 58);
+  ctx.fillText(best, 20, 58);
+
+  ctx.font = '26px serif';
+  ctx.textAlign = 'right';
+  let lx = W - 20;
+  for (let i = 0; i < 3; i++) {
+    ctx.globalAlpha = i < state.lives ? 1 : 0.2;
+    ctx.fillText('❤️', lx, 36);
+    lx -= 32;
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFlash() {
+  if (state.flash > 0) {
+    ctx.fillStyle = state.flashColor;
+    ctx.globalAlpha = (state.flash / 20);
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0, 30, 60, 0.65)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 64px sans-serif';
+  ctx.fillText('Game Over', W / 2, H / 2 - 60);
+  ctx.font = '28px sans-serif';
+  ctx.fillText(`Final Score: ${state.score}`, W / 2, H / 2 - 10);
+  ctx.fillText(`Best: ${state.best}`, W / 2, H / 2 + 28);
+  ctx.font = '20px sans-serif';
+  ctx.fillStyle = '#FFD84D';
+  ctx.fillText('Press SPACE or tap to play again', W / 2, H / 2 + 80);
+}
+
+function reset() {
+  state.items = [];
+  state.score = 0;
+  state.lives = 3;
+  state.spawnTimer = 0;
+  state.spawnRate = 55;
+  state.t = 0;
+  state.flash = 0;
+  state.player.x = W / 2;
+  state.running = true;
+}
+
+function loop() {
+  if (state.running) update();
+  drawBackground();
+  drawItems();
+  drawPlayer();
+  drawFlash();
+  drawHUD();
+  if (!state.running) drawGameOver();
+  requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
